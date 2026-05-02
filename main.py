@@ -7,7 +7,6 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 from openai import OpenAI
 from supabase import create_client
 
-# ── Configuração ──────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -21,7 +20,46 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 supabase      = create_client(SUPABASE_URL, SUPABASE_KEY)
 historico: dict[int, list] = {}
 
-# ── Core ──────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """Você é o assistente bíblico pessoal do Eli Oliveira, um homem comum transformado por Cristo.
+
+━━━━━━━━━━━━━━━━━━━━━━
+SOBRE ELI OLIVEIRA
+━━━━━━━━━━━━━━━━━━━━━━
+Eli Oliveira é um homem comum, cristão, compositor e guitarrista — inclusive do Marçal Talks com Pablo Marçal. Não é pastor, não tem título religioso. É esposo de Michele Monique há mais de 18 anos, pai de Davih e Anna Rebecah.
+
+Nasceu e cresceu dentro da igreja, mas viveu anos preso na religiosidade sem vida real com Deus. Foi músico e líder de departamento na Assembleia de Deus Ministério Perus, em Osasco/SP, mas vivia uma dupla vida: cumpria agendas da igreja e ao mesmo tempo era dependente de álcool por cerca de 7 anos.
+
+Aos 9 anos foi abusado sexualmente durante a construção de uma igreja, trauma que trouxe distorções comportamentais e emocionais por décadas.
+
+━━━━━━━━━━━━━━━━━━━━━━
+TESTEMUNHO DE LIBERTAÇÃO
+━━━━━━━━━━━━━━━━━━━━━━
+Em fevereiro de 2020, Eli saía do trabalho às 16h30 e chegava em casa à meia-noite, passando horas nos bares bebendo vodka com Coca-Cola. Usava sertralina e Rivotril. Orava pedindo a Deus para tirar a vontade de beber, mas não conseguia vencer.
+
+Uma noite chegou em casa alcoolizado. Sua esposa Michele foi tomar banho e pediu que, se a bebê Anna chorasse, ele a pegasse. Quando Anna chorou, Eli a pegou no colo. Ao olhar nos olhos da filha — que tinha apenas 1 ano — viu um semblante sobrenatural, como de uma mulher adulta, com olhar profundo. Sentiu como se ela dissesse: "Eu vim ao mundo para ter um pai alcoólatra?"
+
+Aquilo o quebrou por dentro. Chorou, suas pernas ficaram bambas, foi tomado por vergonha e tristeza. Daquele dia em diante, há mais de 6 anos, não coloca álcool na boca.
+
+Eli entende que os olhos da filha foram a "sarça ardente" — o Cristo usando Anna para transmitir aquela mensagem. A libertação veio também pelas orações e paciência de Michele. O nome Rebeca significa "aquela que une" — ela o uniu ao Senhor.
+
+━━━━━━━━━━━━━━━━━━━━━━
+LINHA TEOLÓGICA
+━━━━━━━━━━━━━━━━━━━━━━
+Eli não segue denominação religiosa. Segue a igreja que Jesus congregou e ensinou: servir aos pobres, órfãos, viúvas e necessitados. Acredita na transformação real pela presença do Espírito Santo, não em religiosidade de fachada.
+
+━━━━━━━━━━━━━━━━━━━━━━
+COMO VOCÊ DEVE RESPONDER
+━━━━━━━━━━━━━━━━━━━━━━
+- Respostas CURTAS e DIRETAS — vá ao ponto
+- Use os estudos da base como referência principal
+- Cite versículos quando relevante, mas com naturalidade
+- Seja acolhedor, humano e sem religiosidade vazia
+- Se perguntarem sobre Eli, seu testemunho ou sua história, responda com base nas informações acima e na base de estudos
+- Nunca invente informações sobre Eli que não estejam na base
+- Fale sempre em português do Brasil
+- Quando a pergunta for pessoal (solidão, vício, família, dor), conecte com o testemunho de Eli quando fizer sentido
+- Não use linguagem religiosa vazia ("que Deus abençoe", "glória a Deus" a todo momento)
+"""
 
 def gerar_embedding(texto: str) -> list[float]:
     resp = openai_client.embeddings.create(model="text-embedding-ada-002", input=texto[:8000])
@@ -34,85 +72,74 @@ def buscar_estudos(embedding: list[float], quantidade: int = 20) -> list[dict]:
 def montar_contexto(docs: list[dict]) -> str:
     partes = []
     for i, doc in enumerate(docs, 1):
-        titulo = (doc.get("metadata") or {}).get("titulo") or (doc.get("metadata") or {}).get("source") or f"Estudo {i}"
-        partes.append(f"[{i}] {titulo}\n{(doc.get('content') or '')[:600]}")
+        meta  = doc.get("metadata") or {}
+        titulo = meta.get("titulo") or meta.get("source") or f"Estudo {i}"
+        texto  = (doc.get("content") or "")[:500]
+        partes.append(f"[{i}] {titulo}\n{texto}")
     return "\n\n---\n\n".join(partes)
 
 def gerar_resposta(pergunta: str, contexto: str, hist: list) -> str:
-    system = """Você é um assistente especializado em estudos bíblicos do pastor Eli Oliveira.
-Use os estudos fornecidos como base. Responda em português do Brasil com profundidade e fidelidade às Escrituras.
-Cite versículos relevantes. Seja pastoral e acolhedor. Mencione as referências ao final."""
-    msgs = [{"role": "system", "content": system}]
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     msgs.extend(hist[-8:])
-    msgs.append({"role": "user", "content": f"ESTUDOS:\n{contexto}\n\nPERGUNTA: {pergunta}"})
-    resp = openai_client.chat.completions.create(model="gpt-4o-mini", messages=msgs, temperature=0.4, max_tokens=1200)
+    msgs.append({"role": "user", "content": f"ESTUDOS RELEVANTES DA BASE:\n{contexto}\n\nPERGUNTA: {pergunta}"})
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini", messages=msgs, temperature=0.4, max_tokens=800
+    )
     return resp.choices[0].message.content
 
 def salvar_log(user_id, username, first_name, pergunta, resposta, docs_encontrados, tempo_ms):
     try:
         supabase.table("bot_logs").insert({
-            "user_id": user_id,
-            "username": username,
-            "first_name": first_name,
-            "pergunta": pergunta[:1000],
-            "resposta": resposta[:2000],
-            "docs_encontrados": docs_encontrados,
-            "tempo_resposta_ms": tempo_ms,
+            "user_id": user_id, "username": username, "first_name": first_name,
+            "pergunta": pergunta[:1000], "resposta": resposta[:2000],
+            "docs_encontrados": docs_encontrados, "tempo_resposta_ms": tempo_ms,
         }).execute()
     except Exception as e:
         log.error(f"Erro ao salvar log: {e}")
 
-# ── Handlers ──────────────────────────────────────────────────────────────
-
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nome = update.effective_user.first_name or "amigo"
     await update.message.reply_text(
-        f"✦ Olá, {nome}! Bem-vindo aos Estudos Bíblicos.\n\n"
-        "Faça qualquer pergunta sobre a Bíblia e buscarei nos estudos "
-        "do pastor Eli Oliveira para responder com profundidade.\n\n"
-        "Pode digitar sua pergunta! 🙏"
+        f"Olá, {nome}! 🙏\n\n"
+        "Aqui você encontra os estudos bíblicos do Eli Oliveira.\n\n"
+        "Pode perguntar sobre qualquer tema da Bíblia, sobre o testemunho do Eli, "
+        "ou compartilhar o que está vivendo. Estou aqui para ajudar.\n\n"
+        "Qual é a sua pergunta?"
     )
 
 async def cmd_novo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     historico[update.effective_user.id] = []
-    await update.message.reply_text("✦ Conversa reiniciada! Pode fazer sua nova pergunta.")
+    await update.message.reply_text("Conversa reiniciada! Pode perguntar.")
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if ADMIN_ID != 0 and uid != ADMIN_ID:
-        await update.message.reply_text("⚠️ Comando restrito ao administrador.")
         return
     try:
         logs = supabase.table("bot_logs").select("user_id, first_name, username, criado_em").execute()
         dados = logs.data or []
-
         total = len(dados)
         hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        hoje_count = sum(1 for d in dados if d.get("criado_em", "").startswith(hoje))
+        hoje_count = sum(1 for d in dados if (d.get("criado_em") or "").startswith(hoje))
         usuarios_unicos = len(set(d["user_id"] for d in dados))
-
         contagem = {}
         for d in dados:
             nome = d.get("first_name") or d.get("username") or str(d["user_id"])
             contagem[nome] = contagem.get(nome, 0) + 1
         top5 = sorted(contagem.items(), key=lambda x: x[1], reverse=True)[:5]
-        top5_txt = "\n".join([f"  {i+1}. {n}: {c} msgs" for i, (n, c) in enumerate(top5)])
-
-        # Perguntas por dia (últimos 7 dias)
+        top5_txt = "\n".join([f"  {i+1}. {n}: {c}" for i, (n, c) in enumerate(top5)])
         from collections import Counter
-        dias = Counter(d["criado_em"][:10] for d in dados if d.get("criado_em"))
-        ultimos = sorted(dias.items())[-7:]
-        dias_txt = "\n".join([f"  {dia}: {qtd}" for dia, qtd in ultimos])
-
-        msg = (
-            f"📊 *Estatísticas do Bot*\n\n"
-            f"📨 Total de perguntas: *{total}*\n"
-            f"👥 Usuários únicos: *{usuarios_unicos}*\n"
+        dias = Counter((d.get("criado_em") or "")[:10] for d in dados if d.get("criado_em"))
+        dias_txt = "\n".join([f"  {k}: {v}" for k, v in sorted(dias.items())[-7:]])
+        await update.message.reply_text(
+            f"📊 *Estatísticas*\n\n"
+            f"📨 Total: *{total}*\n"
+            f"👥 Únicos: *{usuarios_unicos}*\n"
             f"📅 Hoje: *{hoje_count}*\n\n"
             f"🏆 *Top usuários:*\n{top5_txt}\n\n"
-            f"📆 *Últimos 7 dias:*\n{dias_txt}"
+            f"📆 *Últimos 7 dias:*\n{dias_txt}",
+            parse_mode="Markdown"
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Erro: {e}")
 
@@ -134,8 +161,8 @@ async def responder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         contexto  = montar_contexto(docs)
         resposta  = gerar_resposta(pergunta, contexto, historico[uid])
 
-        historico[uid].append({"role": "user",     "content": pergunta})
-        historico[uid].append({"role": "assistant", "content": resposta})
+        historico[uid].append({"role": "user",      "content": pergunta})
+        historico[uid].append({"role": "assistant",  "content": resposta})
         historico[uid] = historico[uid][-10:]
 
         salvar_log(uid, username, first_name, pergunta, resposta, len(docs), int((time.time()-inicio)*1000))
@@ -145,12 +172,10 @@ async def responder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         log.error(f"Erro [{uid}]: {e}")
-        await update.message.reply_text("⚠️ Ocorreu um erro. Tente novamente.")
-
-# ── Main ──────────────────────────────────────────────────────────────────
+        await update.message.reply_text("Ocorreu um erro. Tente novamente em instantes.")
 
 def main():
-    log.info("Iniciando bot Palavra Viva...")
+    log.info("Iniciando Palavra Viva Bot...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("novo",  cmd_novo))
@@ -161,4 +186,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
