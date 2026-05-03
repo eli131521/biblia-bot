@@ -1,6 +1,4 @@
-import os
-import time
-import logging
+import os, time, logging
 from datetime import datetime, timezone
 from collections import Counter
 from telegram import Update
@@ -23,45 +21,43 @@ historico: dict[int, list] = {}
 
 SYSTEM_PROMPT = """Você é o assistente bíblico pessoal do Eli Oliveira.
 
-━━━━━━━━━━━━━━━━━━━━━━
-REGRA PRINCIPAL — MUITO IMPORTANTE
-━━━━━━━━━━━━━━━━━━━━━━
-Você deve responder EXCLUSIVAMENTE com base nos estudos do Eli Oliveira que estão na base de dados.
-NÃO use seu conhecimento geral da Bíblia para responder.
-NÃO invente, complete ou amplie além do que está escrito nos estudos.
-Se o estudo do Eli fala sobre determinado ponto, reproduza fielmente o que ele disse.
-Se a base não tiver nada sobre o tema perguntado, diga claramente: "Não encontrei um estudo do Eli sobre esse tema ainda."
+REGRA PRINCIPAL — NUNCA QUEBRE ESTA REGRA:
+Responda EXCLUSIVAMENTE com base nos estudos do Eli Oliveira fornecidos abaixo.
+Não use conhecimento geral da Bíblia. Não invente. Não complete com o que você sabe.
+Se os estudos não cobrirem o tema, diga: "Não encontrei um estudo do Eli sobre esse tema."
 
-━━━━━━━━━━━━━━━━━━━━━━
-COMO RESPONDER
-━━━━━━━━━━━━━━━━━━━━━━
-- Respostas curtas e diretas
-- Use as palavras e expressões do próprio Eli quando possível
-- Cite os versículos exatamente como aparecem nos estudos dele
-- Não use bullet points, negrito ou formatação excessiva — responda como numa conversa
-- Fale em português do Brasil
-- Seja humano e acolhedor, sem religiosidade vazia
-- Quando perguntarem sobre o testemunho do Eli, conte com as palavras dele, não com as suas
+COMO RESPONDER:
+- Curto e direto
+- Use as palavras do próprio Eli quando possível
+- Sem formatação excessiva (sem bullet points, sem negrito) — conversa natural
+- Português do Brasil
+- Humano e acolhedor, sem religiosidade vazia
+- Quando o usuário responder com um número (ex: "1", "2"), entenda como escolha de um item da lista que você acabou de apresentar e aprofunde naquele tema
 
-━━━━━━━━━━━━━━━━━━━━━━
-SOBRE ELI OLIVEIRA
-━━━━━━━━━━━━━━━━━━━━━━
-Eli Oliveira é um homem comum, cristão, compositor e guitarrista do Marçal Talks com Pablo Marçal. Não é pastor. Esposo de Michele Monique há 18 anos, pai de Davih e Anna Rebecah. Nasceu e cresceu na igreja mas viveu anos preso na religiosidade. Foi dependente de álcool por 7 anos. Aos 9 anos foi abusado sexualmente. Em fevereiro de 2020, ao olhar nos olhos da filha Anna (1 ano), teve uma experiência sobrenatural que o libertou do alcoolismo — há mais de 6 anos sem beber. Faz parte da igreja que Jesus ensinou: servir aos pobres, órfãos, viúvas e necessitados. Sem denominação religiosa.
+CONTEXTO DE CONVERSA:
+Você tem acesso ao histórico da conversa. Use-o para entender mensagens curtas como "1", "esse tema", "fale mais", "o que mais tem".
 
-━━━━━━━━━━━━━━━━━━━━━━
-QUANDO PERGUNTAREM "O QUE O ESTUDO DIZ"
-━━━━━━━━━━━━━━━━━━━━━━
-Reproduza fielmente o conteúdo dos estudos encontrados na base.
-Não interprete além do que está escrito.
-Se houver trechos diretos do Eli nos estudos, use-os.
-"""
+SOBRE ELI OLIVEIRA:
+Homem comum, cristão, compositor e guitarrista do Marçal Talks com Pablo Marçal. Não é pastor. Esposo de Michele Monique há 18 anos, pai de Davih e Anna Rebecah. Liberto do alcoolismo há 6 anos após olhar nos olhos da filha Anna. Abusado aos 9 anos. Não segue denominação religiosa — segue a igreja que Jesus ensinou: servir pobres, órfãos, viúvas e necessitados."""
 
 def gerar_embedding(texto: str) -> list[float]:
     resp = openai_client.embeddings.create(model="text-embedding-ada-002", input=texto[:8000])
     return resp.data[0].embedding
 
-def buscar_estudos(embedding: list[float], quantidade: int = 20) -> list[dict]:
+def buscar_por_embedding(embedding: list, quantidade: int = 20) -> list[dict]:
     resp = supabase.rpc("match_documents", {"query_embedding": embedding, "match_count": quantidade}).execute()
+    return resp.data or []
+
+def buscar_por_texto(texto: str) -> list[dict]:
+    """Busca textual como fallback quando embedding não retorna resultados bons."""
+    palavras = [p for p in texto.lower().split() if len(p) > 3][:5]
+    query = " | ".join(palavras)
+    resp = supabase.table("documents") \
+        .select("id, content, metadata, similarity:id") \
+        .ilike("content", f"%{palavras[0]}%") \
+        .order("id", desc=True) \
+        .limit(10) \
+        .execute()
     return resp.data or []
 
 def buscar_estudo_hoje() -> list[dict]:
@@ -73,6 +69,27 @@ def buscar_estudo_hoje() -> list[dict]:
         .limit(5) \
         .execute()
     return resp.data or []
+
+def buscar_estudos_inteligente(pergunta: str, hist: list) -> list[dict]:
+    """Busca combinada: embedding + fallback textual."""
+    # Reconstrói contexto da pergunta com histórico recente
+    contexto_pergunta = pergunta
+    if hist:
+        ultimas = hist[-4:]
+        contexto_pergunta = " ".join([m["content"] for m in ultimas]) + " " + pergunta
+
+    embedding = gerar_embedding(contexto_pergunta)
+    docs = buscar_por_embedding(embedding, 20)
+
+    # Se retornou poucos resultados com similaridade baixa, faz busca textual também
+    if len(docs) < 3:
+        docs_texto = buscar_por_texto(pergunta)
+        ids_existentes = {d.get("id") for d in docs}
+        for d in docs_texto:
+            if d.get("id") not in ids_existentes:
+                docs.append(d)
+
+    return docs[:20]
 
 def montar_contexto(docs: list[dict]) -> str:
     if not docs:
@@ -87,41 +104,37 @@ def montar_contexto(docs: list[dict]) -> str:
 
 def gerar_resposta(pergunta: str, contexto: str, hist: list) -> str:
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-    msgs.extend(hist[-8:])
+    msgs.extend(hist[-10:])
     msgs.append({
         "role": "user",
         "content": (
-            f"ESTUDOS DO ELI ENCONTRADOS NA BASE:\n\n{contexto}\n\n"
+            f"ESTUDOS DO ELI NA BASE:\n\n{contexto}\n\n"
             f"---\n"
-            f"INSTRUÇÃO: Responda a pergunta abaixo usando APENAS o conteúdo dos estudos acima. "
-            f"Não use conhecimento externo.\n\n"
-            f"PERGUNTA: {pergunta}"
+            f"Responda usando APENAS o conteúdo dos estudos acima. Não use conhecimento externo.\n\n"
+            f"PERGUNTA/MENSAGEM: {pergunta}"
         )
     })
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini", messages=msgs, temperature=0.2, max_tokens=600
+        model="gpt-4o-mini", messages=msgs, temperature=0.15, max_tokens=600
     )
     return resp.choices[0].message.content
 
-def salvar_log(user_id, username, first_name, pergunta, resposta, docs_encontrados, tempo_ms):
+def salvar_log(user_id, username, first_name, pergunta, resposta, docs_n, tempo_ms):
     try:
         supabase.table("bot_logs").insert({
             "user_id": user_id, "username": username, "first_name": first_name,
             "pergunta": pergunta[:1000], "resposta": resposta[:2000],
-            "docs_encontrados": docs_encontrados, "tempo_resposta_ms": tempo_ms,
+            "docs_encontrados": docs_n, "tempo_resposta_ms": tempo_ms,
         }).execute()
     except Exception as e:
-        log.error(f"Erro ao salvar log: {e}")
-
-# ── Handlers ──────────────────────────────────────────────────────────────
+        log.error(f"Log error: {e}")
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nome = update.effective_user.first_name or "amigo"
     await update.message.reply_text(
         f"Olá, {nome}! 🙏\n\n"
         "Aqui você acessa os estudos bíblicos do Eli Oliveira.\n\n"
-        "Pode perguntar sobre qualquer tema dos estudos, sobre o testemunho do Eli, "
-        "ou o que está vivendo. Estou aqui para ajudar.\n\n"
+        "Pergunte sobre qualquer tema dos estudos, sobre o testemunho do Eli ou o que está vivendo.\n\n"
         "Qual é a sua pergunta?"
     )
 
@@ -138,7 +151,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         dados = logs.data or []
         total = len(dados)
         hoje  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        hoje_count     = sum(1 for d in dados if (d.get("criado_em") or "").startswith(hoje))
+        hoje_count      = sum(1 for d in dados if (d.get("criado_em") or "").startswith(hoje))
         usuarios_unicos = len(set(d["user_id"] for d in dados))
         contagem = {}
         for d in dados:
@@ -151,8 +164,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📊 *Estatísticas*\n\n"
             f"📨 Total: *{total}*\n👥 Únicos: *{usuarios_unicos}*\n📅 Hoje: *{hoje_count}*\n\n"
-            f"🏆 *Top usuários:*\n{top5_txt}\n\n"
-            f"📆 *Últimos 7 dias:*\n{dias_txt}",
+            f"🏆 *Top usuários:*\n{top5_txt}\n\n📆 *Últimos 7 dias:*\n{dias_txt}",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -172,36 +184,52 @@ async def responder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     inicio = time.time()
 
     try:
-        # Detecta pergunta sobre estudo de hoje
         p = pergunta.lower()
-        if any(x in p for x in ["hoje", "registrado hoje", "estudo de hoje", "último estudo"]):
+
+        # Pergunta sobre estudo de hoje
+        if any(x in p for x in ["hoje", "estudo de hoje", "registrado hoje", "último estudo", "mais recente"]):
             docs = buscar_estudo_hoje()
             if not docs:
-                await update.message.reply_text("Não encontrei estudos registrados hoje ainda.")
-                return
-            contexto = montar_contexto(docs)
-        else:
-            embedding = gerar_embedding(pergunta)
-            docs      = buscar_estudos(embedding, 20)
-            contexto  = montar_contexto(docs)
+                # Tenta pegar o mais recente do banco
+                resp = supabase.table("documents").select("id, content, metadata, criado_date") \
+                    .order("id", desc=True).limit(3).execute()
+                docs = resp.data or []
+                if docs:
+                    data = (docs[0].get("criado_date") or "data desconhecida")
+                    contexto = f"[Estudo mais recente — data: {data}]\n" + montar_contexto(docs)
+                    resposta = gerar_resposta(pergunta, contexto, historico[uid])
+                else:
+                    resposta = "Não há estudos registrados no banco ainda."
+            else:
+                resposta = gerar_resposta(pergunta, montar_contexto(docs), historico[uid])
 
-        resposta = gerar_resposta(pergunta, contexto, historico[uid])
+        # Resposta numérica — continuação de lista
+        elif pergunta.strip() in ["1","2","3","4","5"] and historico[uid]:
+            docs     = buscar_estudos_inteligente(pergunta, historico[uid])
+            contexto = montar_contexto(docs)
+            resposta = gerar_resposta(f"O usuário escolheu a opção {pergunta} da lista anterior. Aprofunde nesse tema.", contexto, historico[uid])
+
+        # Busca normal
+        else:
+            docs     = buscar_estudos_inteligente(pergunta, historico[uid])
+            contexto = montar_contexto(docs)
+            resposta = gerar_resposta(pergunta, contexto, historico[uid])
 
         historico[uid].append({"role": "user",      "content": pergunta})
         historico[uid].append({"role": "assistant",  "content": resposta})
-        historico[uid] = historico[uid][-10:]
+        historico[uid] = historico[uid][-12:]
 
-        salvar_log(uid, username, first_name, pergunta, resposta, len(docs), int((time.time()-inicio)*1000))
+        salvar_log(uid, username, first_name, pergunta, resposta, len(docs) if 'docs' in dir() else 0, int((time.time()-inicio)*1000))
 
         for i in range(0, len(resposta), 4000):
             await update.message.reply_text(resposta[i:i+4000])
 
     except Exception as e:
         log.error(f"Erro [{uid}]: {e}")
-        await update.message.reply_text("Ocorreu um erro. Tente novamente em instantes.")
+        await update.message.reply_text("Ocorreu um erro. Tente novamente.")
 
 def main():
-    log.info("Iniciando Palavra Viva Bot v4...")
+    log.info("Iniciando Palavra Viva Bot v5...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("novo",  cmd_novo))
