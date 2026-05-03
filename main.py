@@ -1,4 +1,4 @@
-import os, time, logging
+import os, time, logging, tempfile
 from datetime import datetime, timezone
 from collections import Counter
 from telegram import Update
@@ -21,24 +21,56 @@ historico: dict[int, list] = {}
 
 SYSTEM_PROMPT = """Você é o assistente bíblico pessoal do Eli Oliveira.
 
-REGRA PRINCIPAL — NUNCA QUEBRE ESTA REGRA:
-Responda EXCLUSIVAMENTE com base nos estudos do Eli Oliveira fornecidos abaixo.
-Não use conhecimento geral da Bíblia. Não invente. Não complete com o que você sabe.
-Se os estudos não cobrirem o tema, diga: "Não encontrei um estudo do Eli sobre esse tema."
+━━━━━━━━━━━━━━━━━━━━━━
+REGRA PRINCIPAL
+━━━━━━━━━━━━━━━━━━━━━━
+Responda SEMPRE com base nos estudos do Eli Oliveira fornecidos na base de dados.
+Não invente. Não complete com conhecimento geral além do que está nos estudos.
+Se a base não tiver o tema, diga: "Não encontrei um estudo do Eli sobre isso ainda."
 
-COMO RESPONDER:
-- Curto e direto
-- Use as palavras do próprio Eli quando possível
-- Sem formatação excessiva (sem bullet points, sem negrito) — conversa natural
+━━━━━━━━━━━━━━━━━━━━━━
+COMO RESPONDER — MUITO IMPORTANTE
+━━━━━━━━━━━━━━━━━━━━━━
+Suas respostas devem ser RICAS e COMPLETAS. Para cada pergunta:
+
+1. EXPLIQUE o tema com base no estudo do Eli — use as palavras e expressões dele
+2. TRAGA EXEMPLOS BÍBLICOS presentes no estudo (versículos, personagens, histórias)
+3. FAÇA A APLICAÇÃO PARA HOJE — como esse ensinamento se aplica à vida atual, à realidade das pessoas
+4. QUANDO HOUVER RELAÇÃO com o testemunho do Eli (álcool, vício, religiosidade, libertação, família, paternidade), conecte naturalmente — sem forçar
+5. TERMINE com uma reflexão ou pergunta que convide o usuário a pensar
+
+Formato da resposta:
+- Parágrafos corridos, sem bullet points ou negrito excessivo
+- Tom pastoral, humano, acolhedor — como uma conversa real
 - Português do Brasil
-- Humano e acolhedor, sem religiosidade vazia
-- Quando o usuário responder com um número (ex: "1", "2"), entenda como escolha de um item da lista que você acabou de apresentar e aprofunde naquele tema
+- Tamanho: entre 150 e 400 palavras por resposta
 
-CONTEXTO DE CONVERSA:
-Você tem acesso ao histórico da conversa. Use-o para entender mensagens curtas como "1", "esse tema", "fale mais", "o que mais tem".
+━━━━━━━━━━━━━━━━━━━━━━
+CONTEXTO DE CONVERSA
+━━━━━━━━━━━━━━━━━━━━━━
+Você tem o histórico completo. Use-o para entender:
+- Mensagens curtas como "1", "2", "3" = escolha de item de lista anterior
+- "fale mais", "continue", "aprofunde" = continuar o tema atual
+- "esse tema", "sobre isso" = referência ao assunto anterior
 
-SOBRE ELI OLIVEIRA:
-Homem comum, cristão, compositor e guitarrista do Marçal Talks com Pablo Marçal. Não é pastor. Esposo de Michele Monique há 18 anos, pai de Davih e Anna Rebecah. Liberto do alcoolismo há 6 anos após olhar nos olhos da filha Anna. Abusado aos 9 anos. Não segue denominação religiosa — segue a igreja que Jesus ensinou: servir pobres, órfãos, viúvas e necessitados."""
+━━━━━━━━━━━━━━━━━━━━━━
+SOBRE ELI OLIVEIRA — USE QUANDO RELEVANTE
+━━━━━━━━━━━━━━━━━━━━━━
+Eli é um homem comum, cristão, compositor e guitarrista do Marçal Talks com Pablo Marçal. Não é pastor. Esposo de Michele Monique há 18 anos, pai de Davih e Anna Rebecah.
+
+Testemunho principal: Foi dependente de álcool por 7 anos. Aos 9 anos sofreu abuso sexual durante a construção de uma igreja. Vivia na religiosidade — músico e líder de departamento na igreja — mas chegava alcoolizado aos ensaios. Em fevereiro de 2020, chegou em casa alcoolizado. Sua filha Anna, de apenas 1 ano, o olhou com um semblante sobrenatural — como se dissesse "vim ao mundo para ter um pai alcoólatra?". Suas pernas bambaram, começou a chorar. Daquele dia, há mais de 6 anos, não bebe. Entende que os olhos da filha foram a "sarça ardente" — Cristo usando Anna como instrumento. A libertação veio também pelas orações e paciência de Michele. Rebeca significa "aquela que une" — ela o uniu ao Senhor.
+
+Outros temas do testemunho: pornografia, religiosidade vazia, dupla vida, cura de traumas, domínio próprio como fruto do Espírito Santo, pai presente, casamento restaurado.
+
+Não segue denominação. Segue a igreja que Jesus ensinou: servir pobres, órfãos, viúvas e necessitados.
+
+━━━━━━━━━━━━━━━━━━━━━━
+QUANDO PROCESSAR ÁUDIO OU IMAGEM
+━━━━━━━━━━━━━━━━━━━━━━
+O conteúdo transcrito ou descrito será enviado junto com a pergunta.
+Trate como se fosse texto normal — busque na base e responda com a mesma riqueza."""
+
+# ── Banco e embeddings ────────────────────────────────────────────────────
 
 def gerar_embedding(texto: str) -> list[float]:
     resp = openai_client.embeddings.create(model="text-embedding-ada-002", input=texto[:8000])
@@ -49,15 +81,13 @@ def buscar_por_embedding(embedding: list, quantidade: int = 20) -> list[dict]:
     return resp.data or []
 
 def buscar_por_texto(texto: str) -> list[dict]:
-    """Busca textual como fallback quando embedding não retorna resultados bons."""
-    palavras = [p for p in texto.lower().split() if len(p) > 3][:5]
-    query = " | ".join(palavras)
+    palavras = [p for p in texto.lower().split() if len(p) > 3]
+    if not palavras:
+        return []
     resp = supabase.table("documents") \
-        .select("id, content, metadata, similarity:id") \
+        .select("id, content, metadata") \
         .ilike("content", f"%{palavras[0]}%") \
-        .order("id", desc=True) \
-        .limit(10) \
-        .execute()
+        .order("id", desc=True).limit(10).execute()
     return resp.data or []
 
 def buscar_estudo_hoje() -> list[dict]:
@@ -65,30 +95,19 @@ def buscar_estudo_hoje() -> list[dict]:
     resp = supabase.table("documents") \
         .select("id, content, metadata, criado_date") \
         .gte("criado_date", hoje) \
-        .order("id", desc=True) \
-        .limit(5) \
-        .execute()
+        .order("id", desc=True).limit(5).execute()
     return resp.data or []
 
 def buscar_estudos_inteligente(pergunta: str, hist: list) -> list[dict]:
-    """Busca combinada: embedding + fallback textual."""
-    # Reconstrói contexto da pergunta com histórico recente
-    contexto_pergunta = pergunta
-    if hist:
-        ultimas = hist[-4:]
-        contexto_pergunta = " ".join([m["content"] for m in ultimas]) + " " + pergunta
-
+    contexto_pergunta = " ".join([m["content"] for m in hist[-4:]]) + " " + pergunta
     embedding = gerar_embedding(contexto_pergunta)
     docs = buscar_por_embedding(embedding, 20)
-
-    # Se retornou poucos resultados com similaridade baixa, faz busca textual também
     if len(docs) < 3:
-        docs_texto = buscar_por_texto(pergunta)
-        ids_existentes = {d.get("id") for d in docs}
-        for d in docs_texto:
-            if d.get("id") not in ids_existentes:
+        extras = buscar_por_texto(pergunta)
+        ids = {d.get("id") for d in docs}
+        for d in extras:
+            if d.get("id") not in ids:
                 docs.append(d)
-
     return docs[:20]
 
 def montar_contexto(docs: list[dict]) -> str:
@@ -98,7 +117,7 @@ def montar_contexto(docs: list[dict]) -> str:
     for i, doc in enumerate(docs, 1):
         meta   = doc.get("metadata") or {}
         titulo = meta.get("titulo") or meta.get("source") or f"Estudo {i}"
-        texto  = (doc.get("content") or "")[:600]
+        texto  = (doc.get("content") or "")[:700]
         partes.append(f"[Estudo {i} — {titulo}]\n{texto}")
     return "\n\n---\n\n".join(partes)
 
@@ -108,14 +127,14 @@ def gerar_resposta(pergunta: str, contexto: str, hist: list) -> str:
     msgs.append({
         "role": "user",
         "content": (
-            f"ESTUDOS DO ELI NA BASE:\n\n{contexto}\n\n"
-            f"---\n"
-            f"Responda usando APENAS o conteúdo dos estudos acima. Não use conhecimento externo.\n\n"
-            f"PERGUNTA/MENSAGEM: {pergunta}"
+            f"ESTUDOS DO ELI NA BASE:\n\n{contexto}\n\n---\n\n"
+            f"Responda com base nos estudos acima. Seja rico, detalhado, com exemplos bíblicos "
+            f"e aplicação para o dia de hoje. Quando relevante, conecte com o testemunho do Eli.\n\n"
+            f"PERGUNTA: {pergunta}"
         )
     })
     resp = openai_client.chat.completions.create(
-        model="gpt-4o-mini", messages=msgs, temperature=0.15, max_tokens=600
+        model="gpt-4o-mini", messages=msgs, temperature=0.3, max_tokens=900
     )
     return resp.choices[0].message.content
 
@@ -129,12 +148,45 @@ def salvar_log(user_id, username, first_name, pergunta, resposta, docs_n, tempo_
     except Exception as e:
         log.error(f"Log error: {e}")
 
+# ── Transcrição de áudio ──────────────────────────────────────────────────
+
+async def transcrever_audio(file_bytes: bytes, filename: str) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    with open(tmp_path, "rb") as f:
+        resp = openai_client.audio.transcriptions.create(
+            model="whisper-1", file=(filename, f, "audio/ogg")
+        )
+    os.unlink(tmp_path)
+    return resp.text
+
+# ── Descrição de imagem ───────────────────────────────────────────────────
+
+async def descrever_imagem(file_bytes: bytes) -> str:
+    import base64
+    b64 = base64.b64encode(file_bytes).decode("utf-8")
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": "Descreva o que está nessa imagem em detalhes. Se houver texto bíblico ou referências religiosas, transcreva-os."}
+            ]
+        }],
+        max_tokens=500
+    )
+    return resp.choices[0].message.content
+
+# ── Handlers ──────────────────────────────────────────────────────────────
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nome = update.effective_user.first_name or "amigo"
     await update.message.reply_text(
         f"Olá, {nome}! 🙏\n\n"
         "Aqui você acessa os estudos bíblicos do Eli Oliveira.\n\n"
-        "Pergunte sobre qualquer tema dos estudos, sobre o testemunho do Eli ou o que está vivendo.\n\n"
+        "Pode perguntar sobre qualquer tema, mandar áudio ou imagem — estou aqui para ajudar.\n\n"
         "Qual é a sua pergunta?"
     )
 
@@ -170,56 +222,37 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Erro: {e}")
 
-async def responder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid        = update.effective_user.id
-    username   = update.effective_user.username or ""
-    first_name = update.effective_user.first_name or ""
-    pergunta   = update.message.text.strip()
-    if not pergunta:
-        return
+async def processar_pergunta(uid: int, username: str, first_name: str, pergunta: str, update: Update):
+    """Processa qualquer pergunta (texto, áudio transcrito ou imagem descrita)."""
     if uid not in historico:
         historico[uid] = []
 
-    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     inicio = time.time()
+    p = pergunta.lower()
 
     try:
-        p = pergunta.lower()
-
-        # Pergunta sobre estudo de hoje
         if any(x in p for x in ["hoje", "estudo de hoje", "registrado hoje", "último estudo", "mais recente"]):
             docs = buscar_estudo_hoje()
             if not docs:
-                # Tenta pegar o mais recente do banco
-                resp = supabase.table("documents").select("id, content, metadata, criado_date") \
+                resp_sb = supabase.table("documents").select("id, content, metadata, criado_date") \
                     .order("id", desc=True).limit(3).execute()
-                docs = resp.data or []
-                if docs:
-                    data = (docs[0].get("criado_date") or "data desconhecida")
-                    contexto = f"[Estudo mais recente — data: {data}]\n" + montar_contexto(docs)
-                    resposta = gerar_resposta(pergunta, contexto, historico[uid])
-                else:
-                    resposta = "Não há estudos registrados no banco ainda."
-            else:
-                resposta = gerar_resposta(pergunta, montar_contexto(docs), historico[uid])
-
-        # Resposta numérica — continuação de lista
+                docs = resp_sb.data or []
+            contexto = montar_contexto(docs)
         elif pergunta.strip() in ["1","2","3","4","5"] and historico[uid]:
             docs     = buscar_estudos_inteligente(pergunta, historico[uid])
             contexto = montar_contexto(docs)
-            resposta = gerar_resposta(f"O usuário escolheu a opção {pergunta} da lista anterior. Aprofunde nesse tema.", contexto, historico[uid])
-
-        # Busca normal
+            pergunta = f"O usuário escolheu a opção {pergunta} da lista anterior. Aprofunde com exemplos bíblicos e aplicação."
         else:
             docs     = buscar_estudos_inteligente(pergunta, historico[uid])
             contexto = montar_contexto(docs)
-            resposta = gerar_resposta(pergunta, contexto, historico[uid])
+
+        resposta = gerar_resposta(pergunta, contexto, historico[uid])
 
         historico[uid].append({"role": "user",      "content": pergunta})
         historico[uid].append({"role": "assistant",  "content": resposta})
         historico[uid] = historico[uid][-12:]
 
-        salvar_log(uid, username, first_name, pergunta, resposta, len(docs) if 'docs' in dir() else 0, int((time.time()-inicio)*1000))
+        salvar_log(uid, username, first_name, pergunta, resposta, len(docs), int((time.time()-inicio)*1000))
 
         for i in range(0, len(resposta), 4000):
             await update.message.reply_text(resposta[i:i+4000])
@@ -228,14 +261,70 @@ async def responder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         log.error(f"Erro [{uid}]: {e}")
         await update.message.reply_text("Ocorreu um erro. Tente novamente.")
 
+async def responder_texto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid        = update.effective_user.id
+    username   = update.effective_user.username or ""
+    first_name = update.effective_user.first_name or ""
+    pergunta   = update.message.text.strip()
+    if not pergunta:
+        return
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await processar_pergunta(uid, username, first_name, pergunta, update)
+
+async def responder_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid        = update.effective_user.id
+    username   = update.effective_user.username or ""
+    first_name = update.effective_user.first_name or ""
+
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text("🎤 Transcrevendo seu áudio...")
+
+    try:
+        audio = update.message.voice or update.message.audio
+        file  = await ctx.bot.get_file(audio.file_id)
+        file_bytes = await file.download_as_bytearray()
+        transcricao = await transcrever_audio(bytes(file_bytes), "audio.ogg")
+        await update.message.reply_text(f"📝 Transcrição: _{transcricao}_", parse_mode="Markdown")
+        await processar_pergunta(uid, username, first_name, transcricao, update)
+    except Exception as e:
+        log.error(f"Erro áudio [{uid}]: {e}")
+        await update.message.reply_text("Não consegui processar o áudio. Tente enviar em texto.")
+
+async def responder_imagem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid        = update.effective_user.id
+    username   = update.effective_user.username or ""
+    first_name = update.effective_user.first_name or ""
+
+    await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text("🖼️ Analisando a imagem...")
+
+    try:
+        photo = update.message.photo[-1]  # maior resolução
+        file  = await ctx.bot.get_file(photo.file_id)
+        file_bytes = await file.download_as_bytearray()
+        descricao = await descrever_imagem(bytes(file_bytes))
+
+        caption = update.message.caption or ""
+        pergunta = f"[Imagem enviada — descrição: {descricao}]. {caption}".strip()
+
+        await update.message.reply_text(f"🔍 Entendi a imagem. Buscando nos estudos...")
+        await processar_pergunta(uid, username, first_name, pergunta, update)
+    except Exception as e:
+        log.error(f"Erro imagem [{uid}]: {e}")
+        await update.message.reply_text("Não consegui processar a imagem. Tente descrever em texto.")
+
+# ── Main ──────────────────────────────────────────────────────────────────
+
 def main():
-    log.info("Iniciando Palavra Viva Bot v5...")
+    log.info("Iniciando Palavra Viva Bot v6...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("novo",  cmd_novo))
     app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    log.info("Bot rodando!")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,          responder_texto))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO,            responder_audio))
+    app.add_handler(MessageHandler(filters.PHOTO,                             responder_imagem))
+    log.info("Bot v6 rodando! Texto, áudio e imagem habilitados.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
